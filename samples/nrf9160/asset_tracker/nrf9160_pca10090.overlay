@@ -1,0 +1,6 @@
+&spi3 {
+	status = "ok";
+	sck-pin = <13>;
+	mosi-pin = <11>;
+	miso-pin = <12>;
+};

@@ -17,7 +17,70 @@
 #include <bsd.h>
 
 #include "nrf_socket.h"
-#include "orientation_detector.h"
+#include <gpio.h>
+//#include "orientation_detector.h"
+#include <spi.h>
+#include <pca63548_orientation_detector.h>
+#include <pca63548_gps.h>
+
+#define SPI_DEV DT_SPI_3_NAME
+
+#define CS_CTRL_GPIO_DRV_NAME DT_GPIO_P0_DEV_NAME
+
+struct spi_cs_control spi_od_cs = {
+	.gpio_pin = 10,
+	.delay = 0,
+};
+#define SPI_OD_CS (&spi_od_cs)
+
+static struct device *spi_dev;
+static int od_cs_ctrl_gpio_config(void)
+{
+	spi_od_cs.gpio_dev = device_get_binding(CS_CTRL_GPIO_DRV_NAME);
+	if (!spi_od_cs.gpio_dev) {
+		printk("Cannot find %s!\n",
+			    CS_CTRL_GPIO_DRV_NAME);
+		return -1;
+	}
+   	gpio_pin_write(spi_od_cs.gpio_dev, spi_od_cs.gpio_pin, 1);
+	return 0;
+}
+
+static struct spi_config spi_od_master = {
+	.frequency = 8000000,
+	.operation = SPI_OP_MODE_MASTER | SPI_MODE_CPOL | SPI_MODE_CPHA |
+		     SPI_WORD_SET(8) | SPI_LINES_SINGLE,
+	.slave = 0,
+	.cs = SPI_OD_CS,
+};
+
+struct spi_cs_control spi_gps_cs = {
+	.gpio_pin = 23,
+	.delay = 0,
+};
+#define SPI_GPS_CS (&spi_gps_cs)
+
+static int gps_cs_ctrl_gpio_config(void)
+{
+	spi_gps_cs.gpio_dev = device_get_binding(CS_CTRL_GPIO_DRV_NAME);
+	if (!spi_gps_cs.gpio_dev) {
+		printk("Cannot find %s!\n",
+			    CS_CTRL_GPIO_DRV_NAME);
+		return -1;
+	}
+  	gpio_pin_write(spi_gps_cs.gpio_dev, spi_gps_cs.gpio_pin, 1); 
+
+	return 0;
+}
+
+static struct spi_config spi_gps_master = {
+	.frequency = 4000000,
+	.operation = SPI_OP_MODE_MASTER | SPI_MODE_CPHA | SPI_WORD_SET(8) | SPI_LINES_SINGLE,
+	.slave = 0,
+	.cs = SPI_GPS_CS,
+};
+
+static struct device *gps_io;
 
 /* Interval in milliseconds between each time status LEDs are updated. */
 #define LEDS_UPDATE_INTERVAL	        500
@@ -78,6 +141,7 @@ static bool flip_mode_enabled = true;
 /* Structures for work */
 static struct k_delayed_work leds_update_work;
 static struct k_work connect_work;
+static struct k_delayed_work pca63548_sensor_polling_work;
 
 enum error_type {
 	ERROR_NRF_CLOUD,
@@ -205,15 +269,14 @@ static void sensor_trigger_handler(struct device *dev,
 /**@brief Function for polling flip orientation if mode has been enabled. */
 static void flip_poll(void)
 {
-	static enum orientation_state last_orientation_state =
-		ORIENTATION_NOT_KNOWN;
-	static struct orientation_detector_sensor_data sensor_data;
+	static pca63548_orientation_state_t last_orientation_state = ORIENTATION_NOT_KNOWN;
+	static pca63548_orientation_detector_sensor_data_t sensor_data;
 
 	if (!flip_mode_enabled) {
 		return;
 	}
 
-	if (orientation_detector_poll(&sensor_data) == 0) {
+	if (pca63548_orientation_detector_poll(&sensor_data) == 0) {
 		if (sensor_data.orientation == last_orientation_state) {
 			return;
 		}
@@ -222,10 +285,12 @@ static void flip_poll(void)
 		case ORIENTATION_NORMAL:
 			flip_cloud_data.data.ptr = "NORMAL";
 			flip_cloud_data.data.len = sizeof("NORMAL") - 1;
+			printk("normal");
 			break;
 		case ORIENTATION_UPSIDE_DOWN:
 			flip_cloud_data.data.ptr = "UPSIDE_DOWN";
 			flip_cloud_data.data.len = sizeof("UPSIDE_DOWN") - 1;
+			printk("opp_ned");
 			break;
 		default:
 			return;
@@ -267,6 +332,31 @@ static void leds_update(struct k_work *work)
 	k_delayed_work_submit(&leds_update_work, LEDS_UPDATE_INTERVAL);
 }
 
+/**@brief Update LEDs state. */
+static void pca63548_sensor_polling(struct k_work *work)
+{
+	flip_poll();
+	if(!pca63548_gps_poll(nmea_data.str, 80))
+	{	
+	
+		gps_cloud_data.data.ptr = nmea_data.str;
+		gps_cloud_data.data.len = strlen(nmea_data.str);
+		printk("strlen %d \r\n",gps_cloud_data.data.len);
+		if(gps_cloud_data.data.len != 0)
+		{
+			gps_cloud_data.tag += 1;
+
+			if (gps_cloud_data.tag == 0) {
+				gps_cloud_data.tag = 0x1;
+			}
+
+			sensor_data_send(&gps_cloud_data);
+		}
+	}
+	ARG_UNUSED(work);
+
+	k_delayed_work_submit(&pca63548_sensor_polling_work, 1000);
+}
 /**@brief Send sensor data to nRF Cloud. **/
 static void sensor_data_send(struct nrf_cloud_sensor_data *data)
 {
@@ -493,7 +583,7 @@ static void button_handler(u32_t buttons, u32_t has_changed)
 	}
 
 	if (has_changed & SWITCH_1) {
-		flip_poll();
+	//	flip_poll();
 	}
 
 	if ((has_changed & SWITCH_2) &&
@@ -565,6 +655,7 @@ static void input_process(void)
 static void work_init(void)
 {
 	k_delayed_work_init(&leds_update_work, leds_update);
+	k_delayed_work_init(&pca63548_sensor_polling_work, pca63548_sensor_polling);
 	k_work_init(&connect_work, cloud_connect);
 	k_delayed_work_submit(&leds_update_work, LEDS_UPDATE_INTERVAL);
 }
@@ -591,74 +682,36 @@ static void modem_configure(void)
 /**@brief Initializes GPS device and configures trigger if set.
  * Gets initial sample from GPS device.
  */
-static void gps_init(void)
+static void pca63548_init(void)
 {
-	int err;
-	struct device *gps_dev = device_get_binding(CONFIG_GPS_DEV_NAME);
-	struct gps_trigger gps_trig = {
-		.type = GPS_TRIG_DATA_READY,
-	};
 
-	if (gps_dev == NULL) {
-		printk("Could not get %s device\n", CONFIG_GPS_DEV_NAME);
+	gps_io = device_get_binding(DT_GPIO_P0_DEV_NAME);
+	
+	if (od_cs_ctrl_gpio_config()) {
 		return;
 	}
-	printk("GPS device found\n");
-
-	if (IS_ENABLED(CONFIG_GPS_TRIGGER)) {
-		err = gps_trigger_set(gps_dev, &gps_trig,
-				gps_trigger_handler);
-
-		if (err) {
-			printk("Could not set trigger, error code: %d\n", err);
-			return;
-		}
-	}
-
-	err = gps_sample_fetch(gps_dev);
-	__ASSERT(err == 0, "GPS sample could not be fetched.");
-
-	err = gps_channel_get(gps_dev, GPS_CHAN_NMEA, &nmea_data);
-	__ASSERT(err == 0, "GPS sample could not be retrieved.");
-}
-
-/**@brief Initializes flip detection using orientation detector module
- * and configured accelerometer device.
- */
-static void flip_detection_init(void)
-{
-	struct device *accel_dev =
-		device_get_binding(CONFIG_ACCEL_DEV_NAME);
-
-	if (accel_dev == NULL) {
-		printk("Could not get %s device\n", CONFIG_ACCEL_DEV_NAME);
+  	if (gps_cs_ctrl_gpio_config()) {
 		return;
 	}
-
-	struct sensor_trigger sensor_trig = {
-		.type = SENSOR_TRIG_DATA_READY,
-	};
-
-	if (IS_ENABLED(CONFIG_ACCEL_TRIGGER)) {
-		int err = 0;
-
-		err = sensor_trigger_set(accel_dev, &sensor_trig,
-				sensor_trigger_handler);
-
-		if (err) {
-			printk("Could not set trigger, error code: %d\n", err);
-			return;
-		}
+  	spi_dev = device_get_binding(SPI_DEV);
+	if (!spi_dev) {
+		printk("SPI: Device driver not found.\n");
+		return;
 	}
-
-	orientation_detector_init(accel_dev);
+	printk("got binding\n");
+	pca63548_gps_init(spi_dev, &spi_gps_master, gps_io);
+	k_sleep(500);
+	pca63548_gps_start();
+	k_sleep(500);
+	pca63548_orientation_detector_init(spi_dev, &spi_od_master); 
 }
+
 
 /**@brief Initializes the sensors that are used by the application. */
 static void sensors_init(void)
 {
-	gps_init();
-	flip_detection_init();
+
+	pca63548_init();
 
 	gps_cloud_data.type = NRF_CLOUD_SENSOR_GPS;
 	gps_cloud_data.tag = 0x1;
@@ -666,6 +719,7 @@ static void sensors_init(void)
 	gps_cloud_data.data.len = nmea_data.len;
 
 	flip_cloud_data.type = NRF_CLOUD_SENSOR_FLIP;
+	k_delayed_work_submit(&pca63548_sensor_polling_work, 5000);
 }
 
 /**@brief Initializes buttons and LEDs, using the DK buttons and LEDs
