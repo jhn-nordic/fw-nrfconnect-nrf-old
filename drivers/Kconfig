@@ -8,4 +8,22 @@ menu "Device Drivers"
 
 rsource "lte_link_control/Kconfig"
 
+menuconfig PCA63548_DRIVERS
+	bool "Demopack drivers"
+	default n
+	help
+	  Enable demopack drivers
+
+if PCA63548_DRIVERS
+
+config PCA63548_ORIENTATION_DETECTOR_DRIVER
+	bool "Enable orientation detector driver"
+	default n
+
+config PCA63548_GPS_DRIVER
+	bool "Enable GPS Driver"
+	default n
+
+endif #PCA63548_DRIVERS
+
 endmenu
