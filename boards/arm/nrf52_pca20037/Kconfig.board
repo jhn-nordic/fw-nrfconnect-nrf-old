@@ -1,0 +1,9 @@
+# Kconfig - nRF52 PCA10040 board configuration
+#
+# Copyright (c) 2019 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: Apache-2.0
+
+config  BOARD_NRF52_PCA20037
+	bool "nRF52 PCA20037"
+	depends on SOC_NRF52832_QFAA

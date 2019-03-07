@@ -32,8 +32,8 @@ enum state {
 };
 
 
-static const u8_t col_pin[] = { 2, 21, 20, 19};
-static const u8_t row_pin[] = {29, 31, 22, 24};
+static const u8_t col_pin[] = { 3, 0, 4,5,6,7,8,9,10,11,12,13,14,15,16,17,1,2};
+static const u8_t row_pin[] = {18, 19, 20, 21 , 22 , 23, 24,31};  
 
 static struct device *gpio_dev;
 static struct gpio_callback gpio_cb;
@@ -62,7 +62,7 @@ static int set_cols(u32_t mask)
 
 static int get_rows(u32_t *mask)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(col_pin); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(row_pin); i++) {
 		u32_t val;
 
 		if (gpio_pin_read(gpio_dev, row_pin[i], &val)) {
@@ -244,7 +244,7 @@ static void matrix_scan_fn(struct k_work *work)
 
 	if (any_pressed) {
 		/* Avoid draining current between scans */
-		if (set_cols(0x00)) {
+		if (set_cols(0x00000000)) {
 			LOG_ERR("Cannot set neutral state");
 			goto error;
 		}
@@ -255,7 +255,7 @@ static void matrix_scan_fn(struct k_work *work)
 		/* If no button is pressed module can switch to callbacks */
 
 		/* Prepare to wait for a callback */
-		if (set_cols(0xFF)) {
+		if (set_cols(0xFFFFFFFF)) {
 			LOG_ERR("Cannot set neutral state");
 			goto error;
 		}
@@ -318,7 +318,7 @@ void button_pressed(struct device *gpio_dev, struct gpio_callback *cb,
 
 	case STATE_ACTIVE:
 		state = STATE_SCANNING;
-		k_delayed_work_submit(&matrix_scan, 0);
+		k_delayed_work_submit(&matrix_scan, 2);
 		break;
 
 	case STATE_SCANNING:
