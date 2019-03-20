@@ -1,0 +1,43 @@
+#
+# Copyright (c) 2018 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-BSD-5-Clause-Nordic
+#
+
+menu "MQTT simple sample"
+config MQTT_PUB_TOPIC
+	string "MQTT publish topic"
+	default "/devices/my-device/events"
+
+config MQTT_SUB_TOPIC
+	string "MQTT subscribe topic"
+	default "/devices/my-device/commands/#"
+
+config MQTT_CLIENT_ID
+	string "MQTT Client ID"
+	default "projects/weather-station-tutorial/locations/us-central1/registries/weather-station-registry/devices/my-device"
+
+config MQTT_BROKER_HOSTNAME
+	string "MQTT broker hostname"
+	default "mqtt.googleapis.com"
+
+config MQTT_BROKER_PORT
+	int "MQTT broker port"
+	default 8883
+
+config MQTT_MESSAGE_BUFFER_SIZE
+	int ""
+	default 1024
+
+config MQTT_PAYLOAD_BUFFER_SIZE
+	int ""
+	default 1024
+
+config CLOUD_AUDIENCE
+	string "Google cloud audience"
+	default "weather-station-tutorial"
+endmenu
+
+menu "Zephyr Kernel"
+source "$ZEPHYR_BASE/Kconfig.zephyr"
+endmenu
