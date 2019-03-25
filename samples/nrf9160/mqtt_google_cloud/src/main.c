@@ -18,9 +18,24 @@
 #include "nrf_inbuilt_key.h"
 #include <console.h>
 #include "ntp.h"
+#include <uart.h>
+#include <ring_buffer.h>
+#include "minmea.h"
+
+
 #define MQTT_INPUT_PERIOD K_SECONDS(1)
 #define MQTT_LIVE_PERIOD K_SECONDS(55)
 
+#define UART_BUF_SIZE			250
+
+
+struct device *uart_dev;
+
+/* rx data */
+struct ring_buf rx_rb;
+struct k_sem rx_sem;
+
+static K_FIFO_DEFINE(uart_1_tx_fifo);
 /* Buffers for MQTT client. */
 static u8_t rx_buffer[CONFIG_MQTT_MESSAGE_BUFFER_SIZE];
 static u8_t tx_buffer[CONFIG_MQTT_MESSAGE_BUFFER_SIZE];
@@ -515,13 +530,162 @@ static void mqtt_input_handler(struct k_work *work) {
         }
     }
 }
+
+
+
+static struct k_work uart_work;
+
+static void receiver_isr(struct device *uart_dev)
+{
+	int rx, ret;
+	static u8_t read_buf[100];
+	u8_t c;
+
+	if (!uart_dev) {
+		return;
+	}
+
+	/* get all of the data off UART as fast as we can */
+	while (uart_irq_update(uart_dev) &&
+	       uart_irq_rx_ready(uart_dev)) {
+		rx = uart_fifo_read(uart_dev, read_buf, sizeof(read_buf));
+		if (rx > 0) {
+			//read_buf[rx]='\0';
+			//printk("%s",read_buf);
+			ret = ring_buf_put(&rx_rb, read_buf, rx);
+			if (ret != rx) {
+				printk("Rx buffer doesn't have enough space. "
+						"Bytes pending: %d, written: %d",
+						rx, ret);
+				while (uart_fifo_read(uart_dev, &c, 1) > 0) {
+					continue;
+				}
+				k_sem_give(&rx_sem);
+				break;
+			}
+			k_sem_give(&rx_sem);
+		}
+	}
+}
+
+#define NMEA_SENTENCE           "$GPRMC" //NMEA sentence that is searched for
+static void uart_work_handler(struct k_work *work) {
+	static u8_t read_buf[100];
+	static char nmea_string[83];
+	static bool active_nmea_read=false;
+	static int i;
+	u8_t ret;
+	k_sem_take(&rx_sem, K_FOREVER);
+	while(ring_buf_is_empty(&rx_rb)==0)
+	{
+		ret = ring_buf_get(&rx_rb, read_buf, 1);
+		if(ret > 0)
+		{
+			if(active_nmea_read==false)
+			{
+				if(read_buf[0]=='$')
+				{
+					i=0;
+					nmea_string[i++]=read_buf[0];
+					active_nmea_read=true;
+				}
+			}
+			else{
+				nmea_string[i++]=read_buf[0];
+				if(read_buf[0]=='\n')
+				{
+					active_nmea_read=false;
+					nmea_string[i]='\0';
+					if((char *)strstr(nmea_string, NMEA_SENTENCE) != NULL)
+					{
+						//printk("%s",nmea_string);
+						// Pointer to struct containing the parsed data. Should be freed manually.
+					
+						//char line[]= "$GPGGA,092751.000,5321.6802,N,00630.3371,W,1,8,1.03,61.7,M,55.3,M,,*75\r\n";
+						   char *line = nmea_string;
+						    switch (minmea_sentence_id(line, false)) {
+							case MINMEA_SENTENCE_RMC: {
+							struct minmea_sentence_rmc frame;
+							if (minmea_parse_rmc(&frame, line)) {
+								printf("{\"latlon\":{\"sp\":\"%f\",\"lon\":\"%f\",\"lat\":\"%f\"}}\n",
+									minmea_tofloat(&frame.speed),
+									minmea_tocoord(&frame.latitude),
+									minmea_tocoord(&frame.longitude));
+							}
+							} break;
+
+							case MINMEA_SENTENCE_GGA: {
+							struct minmea_sentence_gga frame;
+							if (minmea_parse_gga(&frame, line)) {
+								//printk("$GGA: fix quality: %d\n", frame.fix_quality);
+								printf("{ \"lat\" : %f , \"long\" : %f }\n",
+									minmea_tocoord(&frame.latitude),
+									minmea_tocoord(&frame.longitude));
+								
+							}
+							} break;
+
+							case MINMEA_SENTENCE_GSV: {
+							struct minmea_sentence_gsv frame;
+							if (minmea_parse_gsv(&frame, line)) {
+								printk("$GSV: message %d of %d\n", frame.msg_nr, frame.total_msgs);
+								printk("$GSV: sattelites in view: %d\n", frame.total_sats);
+								for (int i = 0; i < 4; i++)
+								printk("$GSV: sat nr %d, elevation: %d, azimuth: %d, snr: %d dbm\n",
+									frame.sats[i].nr,
+									frame.sats[i].elevation,
+									frame.sats[i].azimuth,
+									frame.sats[i].snr);
+							}
+							} break;
+						}
+						
+					}
+				}
+				if(i>82) //to long. start over.
+				{
+					nmea_string[82]='\0';
+					//printk("%s",nmea_string);
+					active_nmea_read=false;
+				}	
+			}			
+		}
+
+		//printk("%s",read_buf);
+	}
+		k_work_submit(&uart_work);
+}
+//https://github.com/adafruit/Adafruit_GPS/blob/master/Adafruit_GPS.cpp
+char gps_rx_buf[100];
 void main(void)
 {
 	int err;
+	u8_t c;
 	//IF YOU NEED TO WRITE CERTIFICATE
-	set_certificate();
+	//set_certificate();
 	
+	uart_dev = device_get_binding("UART_1");
+	if (!uart_dev) {
+		printk("UART 1 init failed\n");
+	}
+
+	printk("uart_dev: %p\n", uart_dev);
+	ring_buf_init(&rx_rb, 200, gps_rx_buf);
+	k_sem_init(&rx_sem, 0, 1);
+	
+	uart_irq_rx_disable(uart_dev);
+	uart_irq_tx_disable(uart_dev);
+	while (uart_fifo_read(uart_dev, &c, 1) > 0) {
+		continue;
+	}
+	uart_irq_callback_set(uart_dev, receiver_isr);
+	uart_irq_rx_enable(uart_dev);
+	k_work_init(&uart_work,uart_work_handler);
+	k_work_submit(&uart_work);
+
+
 	printk("The MQTT simple sample started\n");
+
 	console_getline_init();
 	//time_base = (1553030949         +60) ;
 	
@@ -542,7 +706,7 @@ void main(void)
 		printk("ERROR: fds_init %d\n", err);
 		return;
 	}
-
+	
 	k_delayed_work_init(&mqtt_live_work, mqtt_live_handler);
 	k_delayed_work_submit(&mqtt_live_work, K_SECONDS(0));
 
