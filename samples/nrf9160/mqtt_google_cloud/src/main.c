@@ -598,6 +598,7 @@ static void uart_work_handler(struct k_work *work) {
 					nmea_string[i]='\0';
 					if((char *)strstr(nmea_string, NMEA_SENTENCE) != NULL)
 					{
+						static int i=0;
 						//printk("%s",nmea_string);
 						// Pointer to struct containing the parsed data. Should be freed manually.
 					
@@ -607,10 +608,22 @@ static void uart_work_handler(struct k_work *work) {
 							case MINMEA_SENTENCE_RMC: {
 							struct minmea_sentence_rmc frame;
 							if (minmea_parse_rmc(&frame, line)) {
-								printf("{\"latlon\":{\"sp\":\"%f\",\"lon\":\"%f\",\"lat\":\"%f\"}}\n",
+								char gps_s[100];
+								//sprintf(gps_s,"{\"latlon\":{\"sp\":\"%f\",\"lon\":\"%f\",\"lat\":\"%f\"}}",
+									sprintf(gps_s,"{\"latlon\":{\"sp\": %f,\"lon\": %f ,\"lat\": %f }}",
 									minmea_tofloat(&frame.speed),
 									minmea_tocoord(&frame.latitude),
 									minmea_tocoord(&frame.longitude));
+									if((i++%10)==0)
+									{
+										int err = data_publish(&client, MQTT_QOS_1_AT_LEAST_ONCE,
+											gps_s, strlen(gps_s));
+										if(err<0)
+										{
+											printk("error when publishing\r\n");
+										}
+										else{printk("%s\n",gps_s);}	
+									}
 							}
 							} break;
 
